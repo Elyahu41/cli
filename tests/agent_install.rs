@@ -11,6 +11,7 @@ fn command(binary: &Path, home: &Path) -> Command {
     let mut command = Command::new(binary);
     command
         .env("HOME", home)
+        .env("USERPROFILE", home)
         .env_remove("CODEX_HOME")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("GIT_DIR")
