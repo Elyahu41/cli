@@ -19,7 +19,13 @@ use crate::origin::Origin;
 use crate::{Cli, Command as CliCommand};
 
 const PRIVATE: &str = "installer-private-config-canary";
-const CLIENTS: [Client; 4] = [Client::Codex, Client::Cursor, Client::Gemini, Client::Kiro];
+const CLIENTS: [Client; 5] = [
+    Client::ClaudeCode,
+    Client::Codex,
+    Client::Cursor,
+    Client::Gemini,
+    Client::Kiro,
+];
 
 #[derive(Debug)]
 struct Invocation {
@@ -41,7 +47,11 @@ fn invoke(
     let result = install(
         home,
         codex_home.map(Path::as_os_str),
-        &InstallArgs { client, print },
+        &InstallArgs {
+            client,
+            print,
+            yes: false,
+        },
         origin,
         input,
         &mut output,
@@ -85,7 +95,7 @@ fn configuration(client: Client) -> Vec<u8> {
         Client::Codex => format!(
             "# keep this comment\nmodel = \"chosen-model\"\nlabels = [\"one\", \"two\"]\n\n[mcp_servers.other]\ncommand = \"other-server\"\nargs = [\"a b\"]\n\n[mcp_servers.other.env]\nSECRET = \"{PRIVATE}\"\n"
         ).into_bytes(),
-        Client::Cursor | Client::Gemini | Client::Kiro => serde_json::to_vec_pretty(&json!({
+        Client::ClaudeCode | Client::Cursor | Client::Gemini | Client::Kiro => serde_json::to_vec_pretty(&json!({
             "theme": "chosen-theme",
             "policy": {"trust": false, "autoApprove": [], "excluded": ["untrusted"]},
             "mcpServers": {
@@ -97,16 +107,23 @@ fn configuration(client: Client) -> Vec<u8> {
 }
 
 fn assert_new_server(client: Client, server: &Value, selected_origin: &str) {
-    assert_eq!(server["command"], "proofline");
+    assert_eq!(
+        server["command"],
+        std::env::current_exe().unwrap().to_str().unwrap()
+    );
     assert_eq!(
         server["args"],
         json!(["--base-url", selected_origin, "mcp"])
     );
     assert_eq!(
         server.as_object().unwrap().len(),
-        if client == Client::Cursor { 3 } else { 2 }
+        if matches!(client, Client::Cursor | Client::ClaudeCode) {
+            3
+        } else {
+            2
+        }
     );
-    if client == Client::Cursor {
+    if matches!(client, Client::Cursor | Client::ClaudeCode) {
         assert_eq!(server["type"], "stdio");
     }
 }
@@ -134,7 +151,7 @@ fn entries(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
 }
 
 #[test]
-fn four_clients_preserve_private_settings_and_add_only_the_launcher() {
+fn all_clients_preserve_private_settings_and_add_only_the_launcher() {
     for client in CLIENTS {
         let home = TempDir::new().unwrap();
         let original = configuration(client);
@@ -158,7 +175,10 @@ fn four_clients_preserve_private_settings_and_add_only_the_launcher() {
                     .unwrap()
                     .remove("proofline")
                     .unwrap();
-                assert_eq!(server["command"].as_str(), Some("proofline"));
+                assert_eq!(
+                    server["command"].as_str(),
+                    std::env::current_exe().unwrap().to_str()
+                );
                 assert_eq!(
                     server["args"]
                         .as_array()
@@ -171,7 +191,7 @@ fn four_clients_preserve_private_settings_and_add_only_the_launcher() {
                 assert_eq!(server.as_table().unwrap().len(), 2);
                 assert_eq!(parsed, expected);
             }
-            Client::Cursor | Client::Gemini | Client::Kiro => {
+            Client::ClaudeCode | Client::Cursor | Client::Gemini | Client::Kiro => {
                 let expected: Value = serde_json::from_slice(&original).unwrap();
                 let mut parsed: Value = serde_json::from_str(&actual).unwrap();
                 let server = parsed["mcpServers"]
@@ -288,7 +308,7 @@ fn custom_existing_entries_and_codex_home_are_never_overwritten() {
         let home = TempDir::new().unwrap();
         let original = match client {
             Client::Codex => format!("# {PRIVATE}\nmcp_servers.proofline = {{ command = \"custom-launcher\", args = [\"custom\"] }}\n").into_bytes(),
-            Client::Cursor | Client::Gemini | Client::Kiro => format!("{{\"mcpServers\":{{\"proofline\":null}},\"private\":\"{PRIVATE}\"}}").into_bytes(),
+            Client::ClaudeCode | Client::Cursor | Client::Gemini | Client::Kiro => format!("{{\"mcpServers\":{{\"proofline\":null}},\"private\":\"{PRIVATE}\"}}").into_bytes(),
         };
         let path = seed(home.path(), client, &original);
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
@@ -391,7 +411,12 @@ fn toml_inline_tables_and_separate_arguments_round_trip_in_unicode_homes() {
         Cli::try_parse_from(std::iter::once("proofline").chain(args.iter().copied())).unwrap();
     assert_eq!(cli.base_url, "http://[::1]:8080");
     assert!(matches!(cli.command, CliCommand::Mcp));
-    for client in [Client::Cursor, Client::Gemini, Client::Kiro] {
+    for client in [
+        Client::ClaudeCode,
+        Client::Cursor,
+        Client::Gemini,
+        Client::Kiro,
+    ] {
         let precision = "{\"mcpServers\":{\"other\":{\"value\":184467440737095516170}},\"precision\":1.2345678901234567890123456789}";
         seed(&home, client, precision.as_bytes());
         let result = invoke(
@@ -673,7 +698,7 @@ fn invalid_duplicate_oversized_and_readonly_documents_stay_private_and_intact() 
                 "mcp_servers = 42\n".to_owned(),
                 "mcp_servers = []\nmcp_servers = {}\n".to_owned(),
             ],
-            Client::Cursor | Client::Gemini | Client::Kiro => vec![
+            Client::ClaudeCode | Client::Cursor | Client::Gemini | Client::Kiro => vec![
                 format!("{{\"private\":\"{PRIVATE}\", \"unfinished\": "),
                 "[]".to_owned(),
                 "{\"mcpServers\": []}".to_owned(),
@@ -771,7 +796,14 @@ fn an_overlong_answer_and_unknown_client_or_output_flag_cannot_write() {
             "--output",
             ".codex/config.toml",
         ],
-        vec!["proofline", "agent", "install", "gemini", "--yes"],
+        vec![
+            "proofline",
+            "agent",
+            "install",
+            "gemini",
+            "--yes",
+            "--print",
+        ],
     ] {
         assert!(Cli::try_parse_from(args).is_err());
     }

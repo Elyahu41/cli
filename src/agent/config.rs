@@ -46,12 +46,22 @@ pub(super) fn prepare(
 ) -> Result<Update, InstallError> {
     match client {
         Client::Codex => codex(original, origin),
-        Client::Cursor | Client::Gemini | Client::Kiro => json(client, original, origin),
+        Client::ClaudeCode | Client::Cursor | Client::Gemini | Client::Kiro => {
+            json(client, original, origin)
+        }
     }
 }
 
 fn arguments(origin: &Origin) -> [String; 3] {
     ["--base-url".to_owned(), origin.as_key(), "mcp".to_owned()]
+}
+
+fn executable() -> Result<String, InstallError> {
+    std::env::current_exe()
+        .map_err(InstallError::Executable)?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| InstallError::ExecutableEncoding)
 }
 
 fn codex(original: Option<&[u8]>, origin: &Origin) -> Result<Update, InstallError> {
@@ -68,21 +78,21 @@ fn codex(original: Option<&[u8]>, origin: &Origin) -> Result<Update, InstallErro
     match document.get_mut("mcp_servers") {
         None => {
             let mut servers = Table::new();
-            servers.insert("proofline", Item::Table(codex_server(args)));
+            servers.insert("proofline", Item::Table(codex_server(args)?));
             document.insert("mcp_servers", Item::Table(servers));
         }
         Some(Item::Table(servers)) => {
             if servers.contains_key("proofline") {
                 return Ok(Update::Existing);
             }
-            servers.insert("proofline", Item::Table(codex_server(args)));
+            servers.insert("proofline", Item::Table(codex_server(args)?));
         }
         Some(Item::Value(toml_edit::Value::InlineTable(servers))) => {
             if servers.contains_key("proofline") {
                 return Ok(Update::Existing);
             }
             let mut server = InlineTable::new();
-            server.insert("command", "proofline".into());
+            server.insert("command", executable()?.into());
             server.insert("args", args.into());
             servers.insert("proofline", server.into());
         }
@@ -96,11 +106,11 @@ fn codex(original: Option<&[u8]>, origin: &Origin) -> Result<Update, InstallErro
     Ok(Update::Change(document.to_string().into_bytes()))
 }
 
-fn codex_server(args: Array) -> Table {
+fn codex_server(args: Array) -> Result<Table, InstallError> {
     let mut server = Table::new();
-    server.insert("command", toml_edit::value("proofline"));
+    server.insert("command", toml_edit::value(executable()?));
     server.insert("args", toml_edit::value(args));
-    server
+    Ok(server)
 }
 
 fn json(client: Client, original: Option<&[u8]>, origin: &Origin) -> Result<Update, InstallError> {
@@ -133,10 +143,10 @@ fn json(client: Client, original: Option<&[u8]>, origin: &Origin) -> Result<Upda
         return Ok(Update::Existing);
     }
     let mut server = Map::new();
-    if client == Client::Cursor {
+    if matches!(client, Client::Cursor | Client::ClaudeCode) {
         server.insert("type".to_owned(), Value::String("stdio".to_owned()));
     }
-    server.insert("command".to_owned(), Value::String("proofline".to_owned()));
+    server.insert("command".to_owned(), Value::String(executable()?));
     server.insert(
         "args".to_owned(),
         Value::Array(arguments(origin).into_iter().map(Value::String).collect()),
