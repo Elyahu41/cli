@@ -35,10 +35,15 @@ struct InstallArgs {
     /// Print the credential-free server entry without writing any file.
     #[arg(long)]
     print: bool,
+    /// Save the previewed entry without an interactive confirmation.
+    #[arg(long, conflicts_with = "print")]
+    yes: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Client {
+    #[value(alias = "claude")]
+    ClaudeCode,
     Codex,
     Cursor,
     Gemini,
@@ -48,6 +53,7 @@ enum Client {
 impl Client {
     const fn relative_path(self) -> &'static str {
         match self {
+            Self::ClaudeCode => ".claude.json",
             Self::Codex => ".codex/config.toml",
             Self::Cursor => ".cursor/mcp.json",
             Self::Gemini => ".gemini/settings.json",
@@ -59,6 +65,7 @@ impl Client {
 impl fmt::Display for Client {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
             Self::Cursor => "Cursor",
             Self::Gemini => "Gemini CLI",
@@ -69,6 +76,14 @@ impl fmt::Display for Client {
 
 #[derive(Debug, thiserror::Error)]
 enum InstallError {
+    #[error("could not resolve the running Proofline executable: {0}")]
+    Executable(io::Error),
+    #[error("the running Proofline executable path is not UTF-8")]
+    ExecutableEncoding,
+    #[error(
+        "CLAUDE_CONFIG_DIR selects custom configuration; use --print and configure Claude Code manually"
+    )]
+    CustomClaudeHome,
     #[error("could not find an absolute user home directory")]
     Home,
     #[error(
@@ -152,6 +167,12 @@ pub(crate) async fn run(args: AgentArgs, origin: Origin) -> anyhow::Result<()> {
         let AgentCommand::Install(args) = args.command;
         let home = std::env::home_dir().ok_or(InstallError::Home)?;
         let codex_home = std::env::var_os("CODEX_HOME");
+        if args.client == Client::ClaudeCode
+            && !args.print
+            && std::env::var_os("CLAUDE_CONFIG_DIR").is_some()
+        {
+            return Err(InstallError::CustomClaudeHome);
+        }
         let stdin = io::stdin();
         let stdout = io::stdout();
         let stderr = io::stderr();
@@ -209,21 +230,24 @@ fn install(
         layout.target()
     )
     .map_err(|error| InstallError::console("show the proposed server entry", error))?;
-    write!(diagnostics, "Write this entry? [y/N] ")
-        .and_then(|()| diagnostics.flush())
-        .map_err(|error| InstallError::console("ask for confirmation", error))?;
-    let mut answer = String::new();
-    input
-        .take(65)
-        .read_line(&mut answer)
-        .map_err(|error| InstallError::console("read confirmation", error))?;
-    if answer.len() > 64
-        || !answer.ends_with('\n')
-        || !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-    {
-        writeln!(diagnostics, "No configuration was written.")
-            .map_err(|error| InstallError::console("report the unchanged configuration", error))?;
-        return Ok(Outcome::Cancelled);
+    if !args.yes {
+        write!(diagnostics, "Write this entry? [y/N] ")
+            .and_then(|()| diagnostics.flush())
+            .map_err(|error| InstallError::console("ask for confirmation", error))?;
+        let mut answer = String::new();
+        input
+            .take(65)
+            .read_line(&mut answer)
+            .map_err(|error| InstallError::console("read confirmation", error))?;
+        if answer.len() > 64
+            || !answer.ends_with('\n')
+            || !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        {
+            writeln!(diagnostics, "No configuration was written.").map_err(|error| {
+                InstallError::console("report the unchanged configuration", error)
+            })?;
+            return Ok(Outcome::Cancelled);
+        }
     }
     match layout.save(&before, &bytes, origin)? {
         store::Saved::Existing => {
